@@ -106,28 +106,85 @@ async function resolvePublicMediaUrl(sourceUrl: string) {
 async function requestHuggingFaceSpace(
   endpoint: string,
   payload: { url: string; quality: string; mode: "preview" | "download" },
-) {
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      Accept: payload.mode === "preview" ? "application/json" : "video/mp4",
-      "Content-Type": "application/json",
-      ...(process.env.HF_SPACE_TOKEN
-        ? { Authorization: "Bearer " + process.env.HF_SPACE_TOKEN }
-        : {}),
-    },
-    body: JSON.stringify(payload),
+): Promise<Response> {
+  if (payload.mode === "preview") {
+    const callResponse = await fetch(`${endpoint}/gradio_api/call/preview_video`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...(process.env.HF_SPACE_TOKEN
+          ? { Authorization: "Bearer " + process.env.HF_SPACE_TOKEN }
+          : {}),
+      },
+      body: JSON.stringify({
+        data: [payload.url, payload.quality],
+      }),
+      signal: AbortSignal.timeout(55_000),
+      cache: "no-store",
+    });
+    if (!callResponse.ok) {
+      throw new Error(`Gradio preview gagal (${callResponse.status}).`);
+    }
+    const { event_id: eventId } = (await callResponse.json()) as {
+      event_id?: string;
+    };
+    if (!eventId) throw new Error("Gradio tidak mengembalikan event preview.");
+
+    const resultResponse = await fetch(
+      `${endpoint}/gradio_api/call/preview_video/${eventId}`,
+      {
+        headers: {
+          Accept: "text/event-stream",
+          ...(process.env.HF_SPACE_TOKEN
+            ? { Authorization: "Bearer " + process.env.HF_SPACE_TOKEN }
+            : {}),
+        },
+        signal: AbortSignal.timeout(55_000),
+        cache: "no-store",
+      },
+    );
+    const eventText = await resultResponse.text();
+    const dataLine = eventText
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .reverse()
+      .find((line) => line.includes('"data"'));
+    if (!dataLine) throw new Error("Gradio tidak mengembalikan hasil preview.");
+    const result = JSON.parse(dataLine.slice(5).trim()) as
+      | Array<unknown>
+      | { data?: unknown[] };
+    const rawPreview = Array.isArray(result)
+      ? result[0]
+      : (result.data?.[0] ?? {});
+    const preview = (
+      typeof rawPreview === "string" ? JSON.parse(rawPreview) : rawPreview
+    ) as {
+      previewUrl?: string;
+      filename?: string;
+      type?: "video" | "audio";
+      error?: string;
+    };
+    if (preview.error) throw new Error(preview.error);
+    if (!preview.previewUrl) throw new Error("URL preview tidak tersedia.");
+    return NextResponse.json(preview);
+  }
+
+  const previewResponse = await requestHuggingFaceSpace(endpoint, {
+    ...payload,
+    mode: "preview",
+  });
+  const preview = (await previewResponse.json()) as { previewUrl?: string };
+  if (!preview.previewUrl) throw new Error("URL preview tidak tersedia.");
+  const mediaResponse = await fetch(preview.previewUrl, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; Snapdown/1.0)" },
     signal: AbortSignal.timeout(55_000),
     cache: "no-store",
   });
-  if (!response.ok) {
-    const result = await response.json().catch(() => null);
-    throw new Error(
-      stringifyError(result) ??
-        "Hugging Face downloader gagal memproses video.",
-    );
+  if (!mediaResponse.ok || !mediaResponse.body) {
+    throw new Error("File video gagal diambil dari sumber.");
   }
-  return response;
+  return mediaResponse;
 }
 
 export async function POST(request: NextRequest) {
@@ -159,14 +216,15 @@ export async function POST(request: NextRequest) {
   const spaceUrl = process.env.HF_SPACE_URL?.replace(/\/$/, "");
   if (spaceUrl) {
     try {
-      const response = await requestHuggingFaceSpace(`${spaceUrl}/download`, {
-        url: body.url,
-        quality,
-        mode: body.mode === "preview" ? "preview" : "download",
-      });
-      if (body.mode === "preview") {
-        return NextResponse.json(await response.json());
-      }
+      const response = await requestHuggingFaceSpace(
+        spaceUrl,
+        {
+          url: body.url,
+          quality,
+          mode: body.mode === "preview" ? "preview" : "download",
+        },
+      );
+      if (body.mode === "preview") return response;
       if (!response.body) return errorResponse("File video kosong.", 502);
       return new NextResponse(response.body, {
         headers: {

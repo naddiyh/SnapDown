@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -87,22 +88,32 @@ def health():
     return {"status": "ok", "service": "snapdown-gradio"}
 
 
+def extract_preview(request: DownloadRequest) -> dict:
+    with yt_dlp.YoutubeDL(ytdlp_options(request)) as downloader:
+        info = downloader.extract_info(str(request.url), download=False)
+    preview_url = info.get("url")
+    if not preview_url:
+        raise RuntimeError("URL preview tidak tersedia untuk video ini.")
+    return {
+        "previewUrl": preview_url,
+        "filename": f"snapdown-{request.quality}.mp4",
+        "type": "video",
+    }
+
+
+@spaces.GPU
+def preview_video(url: str, quality: str) -> str:
+    try:
+        request = DownloadRequest(url=url.strip(), quality=quality, mode="preview")
+        return json.dumps(extract_preview(request))
+    except Exception as error:
+        return json.dumps({"error": friendly_error(error)})
+
+
 async def download(request: DownloadRequest):
     try:
         if request.mode == "preview":
-            def extract():
-                with yt_dlp.YoutubeDL(ytdlp_options(request)) as downloader:
-                    info = downloader.extract_info(str(request.url), download=False)
-                    return info.get("url")
-
-            preview_url = await asyncio.to_thread(extract)
-            if not preview_url:
-                raise HTTPException(422, "URL preview tidak tersedia untuk video ini.")
-            return {
-                "previewUrl": preview_url,
-                "filename": f"snapdown-{request.quality}.mp4",
-                "type": "video",
-            }
+            return await asyncio.to_thread(extract_preview, request)
 
         directory = tempfile.mkdtemp(prefix="snapdown-")
         output = str(Path(directory) / "video.%(ext)s")
@@ -157,9 +168,19 @@ with gr.Blocks(title="Snapdown yt-dlp") as demo:
         api_name="check_video",
         concurrency_limit=1,
     )
+    preview_button = gr.Button("Preview API", visible=False)
+    preview_button.click(
+        preview_video,
+        inputs=[url_input, quality_input],
+        outputs=gr.JSON(visible=False),
+        api_name="preview_video",
+        concurrency_limit=1,
+    )
 
-demo.app.add_api_route("/health", health, methods=["GET"])
-demo.app.add_api_route("/download", download, methods=["POST"])
+# Keep the API under a unique prefix so it cannot collide with Gradio's
+# generated routes or a component named "download".
+demo.app.add_api_route("/snapdown-api/health", health, methods=["GET"])
+demo.app.add_api_route("/snapdown-api/download", download, methods=["POST"])
 
 if __name__ == "__main__":
     demo.launch(
