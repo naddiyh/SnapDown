@@ -19,6 +19,24 @@ function errorResponse(error: string, status: number) {
   return NextResponse.json({ error }, { status });
 }
 
+function stringifyError(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value;
+  if (Array.isArray(value)) {
+    const messages = value
+      .map((item) => stringifyError(item))
+      .filter((item): item is string => Boolean(item));
+    return messages.length ? messages.join(". ") : null;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["message", "detail", "error", "msg"]) {
+      const message = stringifyError(record[key]);
+      if (message) return message;
+    }
+  }
+  return null;
+}
+
 function isSupportedUrl(value: unknown): value is string {
   if (typeof value !== "string") return false;
   try {
@@ -95,7 +113,7 @@ async function requestHuggingFaceSpace(
       Accept: payload.mode === "preview" ? "application/json" : "video/mp4",
       "Content-Type": "application/json",
       ...(process.env.HF_SPACE_TOKEN
-        ? { Authorization: `Bearer ${process.env.HF_SPACE_TOKEN}` }
+        ? { Authorization: "Bearer " + process.env.HF_SPACE_TOKEN }
         : {}),
     },
     body: JSON.stringify(payload),
@@ -103,8 +121,11 @@ async function requestHuggingFaceSpace(
     cache: "no-store",
   });
   if (!response.ok) {
-    const result = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(result?.error ?? "Hugging Face downloader gagal memproses video.");
+    const result = await response.json().catch(() => null);
+    throw new Error(
+      stringifyError(result) ??
+        "Hugging Face downloader gagal memproses video.",
+    );
   }
   return response;
 }

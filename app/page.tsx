@@ -51,6 +51,7 @@ export default function Home() {
   const [previewUrl, setPreviewUrl] = useState("");
   const [previewFilename, setPreviewFilename] = useState("");
   const [previewType, setPreviewType] = useState<"video" | "audio">("video");
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
 
   const filteredPlatforms = useMemo(
@@ -78,14 +79,27 @@ export default function Home() {
     void preparePreview("720p");
   }
 
+  function stringifyError(value: unknown): string | null {
+    if (typeof value === "string" && value.trim()) return value;
+    if (Array.isArray(value)) {
+      const messages = value
+        .map((item) => stringifyError(item))
+        .filter((item): item is string => Boolean(item));
+      return messages.length ? messages.join(". ") : null;
+    }
+    if (value && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      for (const key of ["message", "detail", "error", "msg"]) {
+        const message = stringifyError(record[key]);
+        if (message) return message;
+      }
+    }
+    return null;
+  }
+
   async function readErrorMessage(response: Response, fallback: string) {
-    const payload = (await response.json().catch(() => null)) as
-      | { error?: unknown; detail?: unknown; message?: unknown }
-      | null;
-    const detail = payload?.error ?? payload?.detail ?? payload?.message;
-    if (typeof detail === "string") return detail;
-    if (detail) return JSON.stringify(detail);
-    return fallback;
+    const payload = await response.json().catch(() => null);
+    return stringifyError(payload) ?? fallback;
   }
 
   async function preparePreview(label: string) {
@@ -93,6 +107,7 @@ export default function Home() {
     if (isDownloading) return;
 
     setIsDownloading(true);
+    setIsPreviewLoading(true);
     setMessage("");
     setPreviewUrl("");
     try {
@@ -107,19 +122,25 @@ export default function Home() {
       }
 
       const result = (await response.json()) as {
-        previewUrl: string;
-        filename: string;
-        type: "video" | "audio";
+        previewUrl?: unknown;
+        filename?: unknown;
+        type?: "video" | "audio";
       };
+      if (typeof result.previewUrl !== "string" || !result.previewUrl) {
+        throw new Error("Server tidak mengembalikan URL preview video.");
+      }
       setPreviewUrl(result.previewUrl);
-      setPreviewFilename(result.filename);
-      setPreviewType(result.type);
+      setPreviewFilename(
+        typeof result.filename === "string" ? result.filename : "",
+      );
+      setPreviewType(result.type === "audio" ? "audio" : "video");
       setMessage("Preview siap. Periksa videonya, lalu klik tombol unduh.");
     } catch (error) {
       setMessage(
         error instanceof Error ? error.message : "Preview gagal dibuat. Coba lagi.",
       );
     } finally {
+      setIsPreviewLoading(false);
       setIsDownloading(false);
     }
   }
@@ -338,7 +359,7 @@ export default function Home() {
                 ))}
               </div>
               <button
-                disabled={isDownloading}
+                disabled={isDownloading || !previewUrl}
                 onClick={downloadVideo}
                 className="mt-3 flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-ink px-5 text-[14px] font-extrabold text-white transition hover:bg-[#29334a] disabled:cursor-wait disabled:opacity-60"
               >
@@ -347,6 +368,14 @@ export default function Home() {
                   ? "Menyiapkan file..."
                   : `Unduh ${selectedQuality}`}
               </button>
+              {isPreviewLoading && (
+                <div
+                  className="mt-4 rounded-2xl border border-line bg-[#f8fafc] px-4 py-5 text-center text-[13px] font-semibold text-muted"
+                  role="status"
+                >
+                  Menyiapkan preview video...
+                </div>
+              )}
               {previewUrl && (
                 <div className="mt-4 overflow-hidden rounded-2xl border border-line bg-[#101827] p-2">
                   <p className="px-2 pb-2 pt-1 text-[12px] font-bold text-white">
