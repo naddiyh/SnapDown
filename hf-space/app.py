@@ -1,11 +1,13 @@
 import asyncio
+import base64
+import os
 import tempfile
 from pathlib import Path
 from typing import Literal
 
 import gradio as gr
+import spaces
 import yt_dlp
-import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -17,8 +19,8 @@ QUALITY_FORMATS = {
     "480p": "bestvideo[height<=480][ext=mp4]+bestaudio/best[height<=480]/best",
 }
 
-app = FastAPI(title="Snapdown yt-dlp downloader")
-app.add_middleware(
+api = FastAPI(title="Snapdown yt-dlp downloader")
+api.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["POST", "GET"],
@@ -33,22 +35,58 @@ class DownloadRequest(BaseModel):
 
 
 def ytdlp_options(request: DownloadRequest, output: str | None = None) -> dict:
-    return {
+    options = {
         "format": QUALITY_FORMATS[request.quality],
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "merge_output_format": "mp4",
-        **({"outtmpl": output} if output else {}),
+        "http_headers": {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "retries": 3,
+        "fragment_retries": 3,
+        "sleep_interval_requests": 1,
+        "extractor_args": {"instagram": {"skip": ["dash"]}},
     }
 
+    cookies = os.environ.get("INSTAGRAM_COOKIES_B64")
+    if cookies:
+        cookie_path = Path(tempfile.gettempdir()) / "snapdown-instagram-cookies.txt"
+        try:
+            cookie_path.write_bytes(base64.b64decode(cookies))
+            options["cookiefile"] = str(cookie_path)
+        except (ValueError, base64.binascii.Error):
+            raise RuntimeError("INSTAGRAM_COOKIES_B64 tidak valid.")
 
-@app.get("/health")
+    if output:
+        options["outtmpl"] = output
+    return options
+
+
+def friendly_error(error: Exception) -> str:
+    message = str(error)
+    lowered = message.lower()
+    if "rate-limit" in lowered or "login required" in lowered or "requested content is not available" in lowered:
+        return (
+            "Instagram menolak permintaan karena pembatasan akses atau video membutuhkan login. "
+            "Tambahkan cookie Instagram terbaru melalui Secret INSTAGRAM_COOKIES_B64 "
+            "atau coba lagi nanti."
+        )
+    if "private" in lowered:
+        return "Video Instagram ini bersifat privat dan tidak dapat diakses oleh server."
+    return f"Video tidak dapat diproses: {message[:240]}"
+
+
 def health():
     return {"status": "ok", "service": "snapdown-gradio"}
 
 
-@app.post("/download")
 async def download(request: DownloadRequest):
     try:
         if request.mode == "preview":
@@ -85,9 +123,10 @@ async def download(request: DownloadRequest):
     except HTTPException:
         raise
     except Exception as error:
-        raise HTTPException(502, f"Video tidak dapat diproses: {str(error)[:240]}")
+        raise HTTPException(502, friendly_error(error))
 
 
+@spaces.GPU
 def gradio_status(url: str, quality: str):
     if not url.strip():
         return "Masukkan URL video terlebih dahulu."
@@ -97,7 +136,7 @@ def gradio_status(url: str, quality: str):
             info = downloader.extract_info(url.strip(), download=False)
         return f"Video siap diproses: {info.get('title', 'tanpa judul')}"
     except Exception as error:
-        return f"Gagal: {str(error)[:180]}"
+        return f"Gagal: {friendly_error(error)}"
 
 
 with gr.Blocks(title="Snapdown yt-dlp") as demo:
@@ -115,13 +154,16 @@ with gr.Blocks(title="Snapdown yt-dlp") as demo:
         gradio_status,
         inputs=[url_input, quality_input],
         outputs=status_output,
+        api_name="check_video",
+        concurrency_limit=1,
     )
 
-app = gr.mount_gradio_app(app, demo, path="/")
+demo.app.add_api_route("/health", health, methods=["GET"])
+demo.app.add_api_route("/download", download, methods=["POST"])
 
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=7860,
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=7860,
+        show_error=True,
     )

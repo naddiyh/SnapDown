@@ -75,6 +75,17 @@ export default function Home() {
     }
     setMessage("");
     setShowQuality(true);
+    void preparePreview("720p");
+  }
+
+  async function readErrorMessage(response: Response, fallback: string) {
+    const payload = (await response.json().catch(() => null)) as
+      | { error?: unknown; detail?: unknown; message?: unknown }
+      | null;
+    const detail = payload?.error ?? payload?.detail ?? payload?.message;
+    if (typeof detail === "string") return detail;
+    if (detail) return JSON.stringify(detail);
+    return fallback;
   }
 
   async function preparePreview(label: string) {
@@ -92,10 +103,7 @@ export default function Home() {
       });
 
       if (!response.ok) {
-        const result = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new Error(result?.error ?? "Video gagal diunduh.");
+        throw new Error(await readErrorMessage(response, "Preview video gagal dibuat."));
       }
 
       const result = (await response.json()) as {
@@ -128,8 +136,7 @@ export default function Home() {
         body: JSON.stringify({ url: url.trim(), quality: selectedQuality, mode: "download" }),
       });
       if (!response.ok) {
-        const result = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(result?.error ?? "Video gagal diunduh.");
+        throw new Error(await readErrorMessage(response, "Video gagal diunduh."));
       }
       const blob = await response.blob();
       const objectUrl = URL.createObjectURL(blob);
