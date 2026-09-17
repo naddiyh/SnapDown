@@ -149,7 +149,14 @@ async function requestHuggingFaceSpace(
       .split(/\r?\n/)
       .filter((line) => line.startsWith("data:"))
       .reverse()
-      .find((line) => line.includes('"data"'));
+      .find((line) => {
+        try {
+          const value = JSON.parse(line.slice(5).trim()) as unknown;
+          return Array.isArray(value) || Boolean(value && typeof value === "object");
+        } catch {
+          return false;
+        }
+      });
     if (!dataLine) throw new Error("Gradio tidak mengembalikan hasil preview.");
     const result = JSON.parse(dataLine.slice(5).trim()) as
       | Array<unknown>
