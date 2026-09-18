@@ -73,6 +73,12 @@ def ytdlp_options(request: DownloadRequest, output: str | None = None) -> dict:
 def friendly_error(error: Exception) -> str:
     message = str(error)
     lowered = message.lower()
+    if "zerogpu" in lowered and ("quota" in lowered or "limit" in lowered):
+        return (
+            "Kuota ZeroGPU Hugging Face sedang habis. "
+            "Tunggu kuota kembali atau gunakan HF_SPACE_TOKEN dengan akun "
+            "yang memiliki kuota."
+        )
     if "rate-limit" in lowered or "login required" in lowered or "requested content is not available" in lowered:
         return (
             "Instagram menolak permintaan karena pembatasan akses atau video membutuhkan login. "
@@ -94,20 +100,42 @@ def extract_preview(request: DownloadRequest) -> dict:
     preview_url = info.get("url")
     if not preview_url:
         raise RuntimeError("URL preview tidak tersedia untuk video ini.")
+    extracted_headers = info.get("http_headers") or {}
+    preview_headers = {
+        key: value
+        for key, value in extracted_headers.items()
+        if key.lower() in {"user-agent", "referer", "accept", "accept-language"}
+        and isinstance(value, str)
+    }
     return {
         "previewUrl": preview_url,
+        "previewHeaders": preview_headers,
         "filename": f"snapdown-{request.quality}.mp4",
         "type": "video",
     }
 
 
-@spaces.GPU
 def preview_video(url: str, quality: str) -> str:
     try:
         request = DownloadRequest(url=url.strip(), quality=quality, mode="preview")
         return json.dumps(extract_preview(request))
     except Exception as error:
         return json.dumps({"error": friendly_error(error)})
+
+
+def download_video(url: str, quality: str) -> str:
+    directory = tempfile.mkdtemp(prefix="snapdown-")
+    output = str(Path(directory) / "video.%(ext)s")
+    request = DownloadRequest(url=url.strip(), quality=quality, mode="download")
+    try:
+        with yt_dlp.YoutubeDL(ytdlp_options(request, output)) as downloader:
+            downloader.download([str(request.url)])
+        files = list(Path(directory).glob("video.*"))
+        if not files:
+            raise RuntimeError("yt-dlp tidak menghasilkan file.")
+        return str(files[0])
+    except Exception as error:
+        raise RuntimeError(friendly_error(error)) from error
 
 
 async def download(request: DownloadRequest):
@@ -174,6 +202,15 @@ with gr.Blocks(title="Snapdown yt-dlp") as demo:
         inputs=[url_input, quality_input],
         outputs=gr.JSON(visible=False),
         api_name="preview_video",
+        concurrency_limit=1,
+    )
+    download_output = gr.File(visible=False)
+    download_button = gr.Button("Download API", visible=False)
+    download_button.click(
+        download_video,
+        inputs=[url_input, quality_input],
+        outputs=download_output,
+        api_name="download_video",
         concurrency_limit=1,
     )
 

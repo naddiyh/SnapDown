@@ -168,6 +168,7 @@ async function requestHuggingFaceSpace(
       typeof rawPreview === "string" ? JSON.parse(rawPreview) : rawPreview
     ) as {
       previewUrl?: string;
+      previewHeaders?: Record<string, string>;
       filename?: string;
       type?: "video" | "audio";
       error?: string;
@@ -177,19 +178,67 @@ async function requestHuggingFaceSpace(
     return NextResponse.json(preview);
   }
 
-  const previewResponse = await requestHuggingFaceSpace(endpoint, {
-    ...payload,
-    mode: "preview",
-  });
-  const preview = (await previewResponse.json()) as { previewUrl?: string };
-  if (!preview.previewUrl) throw new Error("URL preview tidak tersedia.");
-  const mediaResponse = await fetch(preview.previewUrl, {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; Snapdown/1.0)" },
+  const callResponse = await fetch(`${endpoint}/gradio_api/call/download_video`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...(process.env.HF_SPACE_TOKEN
+        ? { Authorization: "Bearer " + process.env.HF_SPACE_TOKEN }
+        : {}),
+    },
+    body: JSON.stringify({ data: [payload.url, payload.quality] }),
     signal: AbortSignal.timeout(55_000),
     cache: "no-store",
   });
+  if (!callResponse.ok) {
+    throw new Error(`Gradio download gagal (${callResponse.status}).`);
+  }
+  const { event_id: eventId } = (await callResponse.json()) as {
+    event_id?: string;
+  };
+  if (!eventId) throw new Error("Gradio tidak mengembalikan event download.");
+  const resultResponse = await fetch(
+    `${endpoint}/gradio_api/call/download_video/${eventId}`,
+    {
+      headers: {
+        Accept: "text/event-stream",
+        ...(process.env.HF_SPACE_TOKEN
+          ? { Authorization: "Bearer " + process.env.HF_SPACE_TOKEN }
+          : {}),
+      },
+      signal: AbortSignal.timeout(180_000),
+      cache: "no-store",
+    },
+  );
+  const eventText = await resultResponse.text();
+  const dataLine = eventText
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .reverse()
+    .find((line) => line.includes("[") || line.includes("{"));
+  if (!dataLine) throw new Error("Gradio tidak mengembalikan file download.");
+  const result = JSON.parse(dataLine.slice(5).trim()) as unknown;
+  const output = Array.isArray(result) ? result[0] : result;
+  const fileUrl =
+    typeof output === "string"
+      ? output
+      : output && typeof output === "object"
+        ? ((output as { url?: string; path?: string }).url ??
+          (output as { path?: string }).path)
+        : undefined;
+  if (!fileUrl || typeof fileUrl !== "string") {
+    throw new Error("URL file download tidak tersedia.");
+  }
+  const mediaResponse = await fetch(
+    fileUrl.startsWith("http") ? fileUrl : `${endpoint}/file=${fileUrl}`,
+    {
+      signal: AbortSignal.timeout(55_000),
+      cache: "no-store",
+    },
+  );
   if (!mediaResponse.ok || !mediaResponse.body) {
-    throw new Error("File video gagal diambil dari sumber.");
+    throw new Error("File video gagal diambil dari backend.");
   }
   return mediaResponse;
 }
